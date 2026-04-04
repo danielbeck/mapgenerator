@@ -12,7 +12,7 @@ const EXPLORE_RADIUS = 12
  * Used to reward frontiers that border large open unexplored areas.
  */
 function countUnknownNearby(map, known, fx, fy, radius) {
-    const { width, height } = map
+    const { width, height, tiles } = map
     const r2 = radius * radius
     let count = 0
     for (let dy = -radius; dy <= radius; dy++) {
@@ -20,7 +20,10 @@ function countUnknownNearby(map, known, fx, fy, radius) {
             if (dx * dx + dy * dy > r2) continue
             const nx = fx + dx, ny = fy + dy
             if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
-            if (!known[ny * width + nx]) count++
+            const nidx = ny * width + nx
+            // Only count unknown non-wall tiles — walls can never be entered or
+            // seen through, so they don't represent actually-explorable space.
+            if (!known[nidx] && tiles[nidx] !== TILE.WALL) count++
         }
     }
     return count
@@ -40,7 +43,7 @@ function countUnknownNearby(map, known, fx, fy, radius) {
  *
  * Always returns an array of {x,y} starting at `pos`.
  */
-export function planPath(map, pos, known, exitKnown, momentum = null) {
+export function planPath(map, pos, known, exitKnown, momentum = null, dead = null) {
     // Try to reach exit through known tiles
     if (exitKnown) {
         const path = findPath(map, pos, map.exit, known)
@@ -48,7 +51,7 @@ export function planPath(map, pos, known, exitKnown, momentum = null) {
         // Known but not yet reachable through explored area — keep exploring
     }
 
-    const frontiers = findFrontiers(map, known)
+    const frontiers = findFrontiers(map, known, dead)
 
     if (frontiers.length === 0) {
         // Entire reachable space explored — try unrestricted path
@@ -75,8 +78,9 @@ export function planPath(map, pos, known, exitKnown, momentum = null) {
         if (momentum && (momentum.dx !== 0 || momentum.dy !== 0)) {
             const len = Math.sqrt(dx * dx + dy * dy) || 1
             const dot = (dx / len) * momentum.dx + (dy / len) * momentum.dy
-            // Mild nudge only: ahead → ×0.85, behind → ×1.15
-            momentumFactor = 1.0 - 0.15 * dot
+            // Strong directional bias: ahead → ×0.60, behind → ×1.40
+            // Prevents oscillation between equidistant symmetric frontiers.
+            momentumFactor = 1.0 - 0.40 * dot
         }
 
         const unknown = countUnknownNearby(map, known, f.x, f.y, EXPLORE_RADIUS)
@@ -88,26 +92,45 @@ export function planPath(map, pos, known, exitKnown, momentum = null) {
 
     scored.sort((a, b) => a.score - b.score)
 
-    // Run A* on the top candidates and collect valid paths.
-    // Then sort those paths by ACTUAL length — not Manhattan — to find the
-    // truly nearest reachable frontier in maze topology.
-    // This is the core DFS fix: always commit to the shortest actual path,
-    // which naturally exhausts the current corridor before backtracking.
+    // Run A* on the top-scored candidates and collect valid paths.
+    // Sorting by actual path length (not Manhattan) picks the truly nearest
+    // reachable frontier in maze topology.
     const candidates = []
     for (let i = 0; i < Math.min(scored.length, 40); i++) {
         const path = findPath(map, pos, scored[i].f, known)
         if (path && path.length > 1) {
             candidates.push(path)
-            if (candidates.length >= 10) break  // enough to reliably find the nearest
+            if (candidates.length >= 10) break
         }
     }
 
     if (candidates.length > 0) {
-        candidates.sort((a, b) => a.length - b.length)
+        // Primary sort: actual path length.
+        // Tie-break (within 3 steps): prefer the path whose endpoint is more
+        // aligned with the current movement direction. This prevents oscillation
+        // when two equidistant frontiers score identically — the character
+        // commits to whichever direction it was already travelling.
+        candidates.sort((a, b) => {
+            const diff = a.length - b.length
+            if (Math.abs(diff) > 3 || !momentum || (momentum.dx === 0 && momentum.dy === 0)) return diff
+            const aEnd = a[a.length - 1], bEnd = b[b.length - 1]
+            const aDot = (aEnd.x - pos.x) * momentum.dx + (aEnd.y - pos.y) * momentum.dy
+            const bDot = (bEnd.x - pos.x) * momentum.dx + (bEnd.y - pos.y) * momentum.dy
+            return bDot - aDot  // higher dot = more forward = preferred
+        })
         return candidates[0]
     }
 
-    // All frontiers unreachable through explored tiles — unrestricted fallback
+    // All frontiers unreachable through explored tiles.
+    // Try unrestricted A* to the nearest scored frontier — this handles the
+    // "diagonal peephole" case where LOS reveals a tile that is known but only
+    // physically reachable through unexplored corridor.
+    for (let i = 0; i < Math.min(scored.length, 10); i++) {
+        const path = findPath(map, pos, scored[i].f, null)
+        if (path && path.length > 1) return path
+    }
+
+    // Final fallback: unrestricted path to exit
     return findPath(map, pos, map.exit, null) ?? [pos]
 }
 
@@ -119,7 +142,7 @@ export function planPath(map, pos, known, exitKnown, momentum = null) {
  *
  * These are the "edges" of explored space — walking to one will reveal new area.
  */
-function findFrontiers(map, known) {
+function findFrontiers(map, known, dead = null) {
     const { width, height, tiles } = map
     const frontiers = []
 
@@ -127,11 +150,17 @@ function findFrontiers(map, known) {
         for (let x = 0; x < width; x++) {
             const idx = y * width + x
             if (!known[idx] || tiles[idx] === TILE.WALL) continue
+            if (dead && dead.has(idx)) continue  // permanently unresolvable frontier
 
             for (const [ddx, ddy] of DIRS4) {
                 const nx = x + ddx, ny = y + ddy
                 if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
-                if (!known[ny * width + nx]) {
+                const nidx = ny * width + nx
+                // Only count unknown non-wall tiles as interesting unexplored space.
+                // Unknown wall tiles can never be entered or seen through — a frontier
+                // adjacent only to wall tiles is a permanent dead-end that the character
+                // can never resolve (e.g. the inner face of a solid room wall).
+                if (!known[nidx] && tiles[nidx] !== TILE.WALL) {
                     frontiers.push({ x, y })
                     break
                 }

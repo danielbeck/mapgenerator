@@ -14,5 +14,5 @@ export const TILE_COLOR = [
     '#1e1612', // WALL     — dark stone
     '#4a3c2e', // OPEN     — stone floor
     '#22cc66', // ENTRANCE — green
-    '#dd2244', // EXIT     — red
+    '#ffffff', // EXIT     — white
 ]

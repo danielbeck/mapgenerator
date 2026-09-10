@@ -14,6 +14,16 @@ export { xpToLevel }
 const META_BY_ID = Object.fromEntries(GENERATOR_META.map(g => [g.id, g]))
 
 const INITIAL_STATS = { name: 'Adventurer', hp: 100, maxHp: 100, level: 1, xp: 0, attack: 5, armor: 0, mapsCleared: 0 }
+const LOOP_HISTORY_LEN = 10
+const LOOP_PATTERN_LEN = 6
+const LOOP_BREAK_COOLDOWN_STEPS = 12
+
+const CARDINAL_DIRS = [
+    { dx: 1, dy: 0 },
+    { dx: -1, dy: 0 },
+    { dx: 0, dy: 1 },
+    { dx: 0, dy: -1 },
+]
 
 export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, complexity = 0.5 }) {
     const stepMs = stepsPerSec > 0 ? Math.round(1000 / stepsPerSec) : Infinity
@@ -43,6 +53,8 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
     const statsRef = useRef(INITIAL_STATS)
     const deadFrontiersRef = useRef(new Set()) // frontiers that never reveal new tiles when visited
     const visBufferRef = useRef(null)         // reused Uint8Array for LOS output
+    const recentPosRef = useRef([])
+    const loopBreakCooldownRef = useRef(0)
 
     const onRequestNextMapRef = useRef(onRequestNextMap)
     onRequestNextMapRef.current = onRequestNextMap
@@ -64,6 +76,8 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
         enemiesRef.current = placeEnemies(curMap, Math.random, complexityRef.current, statsRef.current.mapsCleared)
         potionsRef.current = placePotions(curMap, Math.random, complexityRef.current, statsRef.current.mapsCleared)
         deadFrontiersRef.current = new Set()
+        recentPosRef.current = [{ ...curMap.entrance }]
+        loopBreakCooldownRef.current = 0
 
         // Allocate (or reallocate) the reusable LOS buffer for this map size
         visBufferRef.current = new Uint8Array(curMap.width * curMap.height)
@@ -252,6 +266,34 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
                     stepIdxRef.current = 0
                 }
 
+                // Detect short ABAB loops and force a one-step sidestep.
+                const loopInfo = recordPositionAndDetectLoop(recentPosRef.current, pos)
+                if (loopBreakCooldownRef.current > 0) loopBreakCooldownRef.current--
+                if (!doneRef.current && loopInfo && loopBreakCooldownRef.current === 0) {
+                    const loopA = loopInfo.a
+                    const loopB = loopInfo.b
+                    deadFrontiersRef.current.add(loopA.y * m.width + loopA.x)
+                    deadFrontiersRef.current.add(loopB.y * m.width + loopB.x)
+
+                    const escapeStep = pickLoopEscapeStep({
+                        map: m,
+                        pos,
+                        known: kn,
+                        avoid: new Set([
+                            loopA.y * m.width + loopA.x,
+                            loopB.y * m.width + loopB.x,
+                        ]),
+                    })
+
+                    if (escapeStep) {
+                        pathRef.current = [pos, escapeStep]
+                        stepIdxRef.current = 0
+                        momentumRef.current = null
+                        loopBreakCooldownRef.current = LOOP_BREAK_COOLDOWN_STEPS
+                        setLog(prev => [...prev, { id: logIdRef.current++, text: 'You shake off a repetitive route and veer to new ground.' }])
+                    }
+                }
+
                 playerPosRef.current = { ...pos }
                 setPlayerPos({ ...pos })
             }
@@ -274,8 +316,8 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
         const DIRS = {
             w: { dx: 0, dy: -1 }, arrowup: { dx: 0, dy: -1 },
             a: { dx: -1, dy: 0 }, arrowleft: { dx: -1, dy: 0 },
-            s: { dx: 0, dy: 1 },  arrowdown: { dx: 0, dy: 1 },
-            d: { dx: 1, dy: 0 },  arrowright: { dx: 1, dy: 0 },
+            s: { dx: 0, dy: 1 }, arrowdown: { dx: 0, dy: 1 },
+            d: { dx: 1, dy: 0 }, arrowright: { dx: 1, dy: 0 },
         }
 
         function handleKeyDown(e) {
@@ -401,4 +443,54 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
     }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
     return { playerPos, knownRef, visibleRef, enemiesRef, potionsRef, log, stats, narrationRef }
+}
+
+function recordPositionAndDetectLoop(history, pos) {
+    history.push({ x: pos.x, y: pos.y })
+    if (history.length > LOOP_HISTORY_LEN) history.shift()
+    if (history.length < LOOP_PATTERN_LEN) return null
+
+    const tail = history.slice(-LOOP_PATTERN_LEN)
+    const a = tail[0]
+    const b = tail[1]
+    if (a.x === b.x && a.y === b.y) return null
+
+    for (let i = 0; i < tail.length; i++) {
+        const expected = i % 2 === 0 ? a : b
+        if (tail[i].x !== expected.x || tail[i].y !== expected.y) return null
+    }
+
+    return { a, b }
+}
+
+function pickLoopEscapeStep({ map, pos, known, avoid }) {
+    let best = null
+    let bestScore = -1
+
+    for (const d of CARDINAL_DIRS) {
+        const nx = pos.x + d.dx
+        const ny = pos.y + d.dy
+        if (nx < 0 || ny < 0 || nx >= map.width || ny >= map.height) continue
+
+        const idx = ny * map.width + nx
+        if (map.tiles[idx] === TILE.WALL) continue
+        if (avoid.has(idx)) continue
+
+        let score = known[idx] ? 0 : 3
+        for (const n of CARDINAL_DIRS) {
+            const ax = nx + n.dx
+            const ay = ny + n.dy
+            if (ax < 0 || ay < 0 || ax >= map.width || ay >= map.height) continue
+            const aIdx = ay * map.width + ax
+            if (map.tiles[aIdx] === TILE.WALL) continue
+            if (!known[aIdx]) score++
+        }
+
+        if (score > bestScore) {
+            bestScore = score
+            best = { x: nx, y: ny }
+        }
+    }
+
+    return best
 }

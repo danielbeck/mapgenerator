@@ -1,6 +1,6 @@
 import { findPath } from '../map/pathfind.js'
 
-export const HP_HIGH_THRESHOLD = 0.9  // above this: chase enemies first
+export const HP_HIGH_THRESHOLD = 0.85  // above this: chase enemies first
 export const HP_REGEN = 0.3           // HP recovered per step with no enemies in sight
 
 /**
@@ -19,8 +19,8 @@ export function updatePassiveState({ hp, maxHp, visibleEnemies }) {
  * Returns { path: Array | null }
  * path === null means "do not override: let the exploration planner decide".
  *
- * High HP (> 90%):  enemies → exit → explore
- * Low HP  (≤ 90%):  potions → exit → explore → enemies
+ * High HP (> 85%):  enemies → exit → explore
+ * Low HP  (≤ 85%):  potions → exit → explore → enemies
  */
 export function chooseBehaviorPath({
     pos, map, known, hp, maxHp,

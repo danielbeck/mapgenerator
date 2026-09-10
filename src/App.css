@@ -114,13 +114,6 @@
   padding: 12px 14px;
 }
 
-#stats-name {
-  font-size: 14px;
-  font-weight: bold;
-  color: #e4d090;
-  margin-bottom: 12px;
-}
-
 .stat-row {
   display: flex;
   align-items: center;

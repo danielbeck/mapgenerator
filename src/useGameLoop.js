@@ -4,9 +4,10 @@ import { computeVisible } from './map/los.js'
 import { planPath } from './map/explore.js'
 import { placeEnemies, stepEnemiesCloser } from './map/enemies.js'
 import { placePotions } from './map/potions.js'
-import { resolveCombat, resolvePotionPickup, xpToLevel } from './map/combat.js'
+import { resolveCombat, resolvePotionPickup, resolveMeleeUntilFlee, xpToLevel } from './map/combat.js'
 import { updatePassiveState, chooseBehaviorPath } from './ai/behavior.js'
 import { findPath } from './map/pathfind.js'
+import { TILE } from './map/tiles.js'
 
 export { xpToLevel }
 
@@ -21,6 +22,7 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
     const [stats, setStats] = useState(INITIAL_STATS)
     const [log, setLog] = useState([{ id: 0, text: 'Your journey begins...' }])
 
+    const playerPosRef = useRef({ ...map.entrance })  // authoritative pos for WASD handler
     const mapRef = useRef(map)
     const knownRef = useRef(null)
     const visibleRef = useRef(null)
@@ -86,6 +88,7 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
         momentumRef.current = null
         pathRef.current = planPath(curMap, curMap.entrance, known, exitKnownRef.current, null)
         stepIdxRef.current = 0
+        playerPosRef.current = { ...curMap.entrance }
         setPlayerPos({ ...curMap.entrance })
 
         if (rafRef.current) cancelAnimationFrame(rafRef.current)
@@ -145,6 +148,7 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
                         statsRef.current = next
                         return next
                     })
+                    playerPosRef.current = { ...pos }
                     setPlayerPos({ ...pos })
                     setTimeout(() => onRequestNextMapRef.current(), 400)
                     return
@@ -215,6 +219,7 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
                     doneRef.current = true
                     setStats(prev => { const next = { ...prev, hp: 0, xp: newXp, level: newLevel }; statsRef.current = next; return next })
                     setLog(prev => [...prev, { id: logIdRef.current++, text: 'You have been slain. Your journey ends here.' }])
+                    playerPosRef.current = { ...pos }
                     setPlayerPos({ ...pos })
                     setTimeout(() => {
                         setStats(INITIAL_STATS)
@@ -247,6 +252,7 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
                     stepIdxRef.current = 0
                 }
 
+                playerPosRef.current = { ...pos }
                 setPlayerPos({ ...pos })
             }
 
@@ -262,6 +268,137 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
             narrationRef.current.scrollTop = narrationRef.current.scrollHeight
         }
     }, [log])
+
+    // ── WASD manual movement (active only when speed = 0 / paused) ────────────
+    useEffect(() => {
+        const DIRS = {
+            w: { dx: 0, dy: -1 }, arrowup: { dx: 0, dy: -1 },
+            a: { dx: -1, dy: 0 }, arrowleft: { dx: -1, dy: 0 },
+            s: { dx: 0, dy: 1 },  arrowdown: { dx: 0, dy: 1 },
+            d: { dx: 1, dy: 0 },  arrowright: { dx: 1, dy: 0 },
+        }
+
+        function handleKeyDown(e) {
+            if (stepMsRef.current !== Infinity) return  // auto-mode running; ignore
+            if (doneRef.current) return
+            const dir = DIRS[e.key.toLowerCase()]
+            if (!dir) return
+            e.preventDefault()
+
+            const m = mapRef.current
+            const pos = playerPosRef.current
+            const nx = pos.x + dir.dx, ny = pos.y + dir.dy
+            if (nx < 0 || ny < 0 || nx >= m.width || ny >= m.height) return
+            if (m.tiles[ny * m.width + nx] === TILE.WALL) return
+
+            const st = statsRef.current
+            let newHp = st.hp, newXp = st.xp, newLevel = st.level
+            let newAttack = st.attack, newArmor = st.armor
+            const allMessages = []
+            let entryPos = { x: nx, y: ny }  // where player ends up
+
+            // ── Enemy movement (step toward player before combat) ─────────────
+            // Use current pos as the player location enemies move toward
+            const preMoveVis = visBufferRef.current
+            preMoveVis.fill(0)
+            computeVisible(m, { x: nx, y: ny }, preMoveVis)
+            const moveMessages = stepEnemiesCloser(enemiesRef.current, m, { x: nx, y: ny }, preMoveVis)
+            allMessages.push(...moveMessages)
+
+            // ── Combat if an enemy occupies the target tile ───────────────────
+            const enemyAtTarget = enemiesRef.current.find(en => en.x === nx && en.y === ny)
+            if (enemyAtTarget) {
+                const result = resolveMeleeUntilFlee({
+                    enemy: enemyAtTarget,
+                    hp: newHp, maxHp: st.maxHp,
+                    xp: newXp, level: newLevel,
+                    attack: newAttack, armor: newArmor,
+                })
+                allMessages.push(...result.messages)
+                newHp = result.newHp; newXp = result.newXp; newLevel = result.newLevel
+                newAttack = result.newAttack; newArmor = result.newArmor
+
+                if (result.enemyDied) {
+                    enemiesRef.current = enemiesRef.current.filter(en => en !== enemyAtTarget)
+                } else {
+                    entryPos = pos  // enemy fled or player stayed in place
+                }
+
+                if (result.playerDied) {
+                    doneRef.current = true
+                    allMessages.push('You have been slain. Your journey ends here.')
+                    setLog(prev => [...prev, ...allMessages.map(text => ({ id: logIdRef.current++, text }))])
+                    setStats(prev => { const next = { ...prev, hp: 0, xp: newXp, level: newLevel }; statsRef.current = next; return next })
+                    playerPosRef.current = pos
+                    setPlayerPos({ ...pos })
+                    setTimeout(() => {
+                        setStats(INITIAL_STATS); statsRef.current = INITIAL_STATS
+                        setLog([{ id: 0, text: 'Your journey begins...' }]); logIdRef.current = 1
+                        onDeathRef.current()
+                    }, 1500)
+                    return
+                }
+            }
+
+            // ── LOS + known map ───────────────────────────────────────────────
+            const visBuf = visBufferRef.current
+            visBuf.fill(0)
+            computeVisible(m, entryPos, visBuf)
+            visibleRef.current = visBuf
+            const kn = knownRef.current
+            const eIdx = m.exit.y * m.width + m.exit.x
+            let exitJustRevealed = false
+            for (let i = 0; i < visBuf.length; i++) {
+                if (visBuf[i] && !kn[i]) {
+                    kn[i] = 1
+                    if (i === eIdx) exitJustRevealed = true
+                }
+            }
+            if (exitJustRevealed) {
+                exitKnownRef.current = true
+                allMessages.unshift('You spot the exit!')
+            }
+
+            // ── Potion pickup ─────────────────────────────────────────────────
+            const potionResult = resolvePotionPickup({ potions: potionsRef.current, pos: entryPos, hp: newHp, maxHp: st.maxHp })
+            potionsRef.current = potionResult.remaining
+            newHp = potionResult.newHp
+            allMessages.push(...potionResult.messages)
+
+            // ── Passive regen (one step) ──────────────────────────────────────
+            const visibleEnemies = enemiesRef.current.filter(en => visBuf[en.y * m.width + en.x])
+            newHp = updatePassiveState({ hp: newHp, maxHp: st.maxHp, visibleEnemies }).newHp
+
+            // ── Exit check ────────────────────────────────────────────────────
+            if (!doneRef.current && entryPos.x === m.exit.x && entryPos.y === m.exit.y) {
+                doneRef.current = true
+                allMessages.push('You slip through the exit and press onward into the dark.')
+                setLog(prev => [...prev, ...allMessages.map(text => ({ id: logIdRef.current++, text }))])
+                setStats(prev => { const next = { ...prev, mapsCleared: prev.mapsCleared + 1 }; statsRef.current = next; return next })
+                playerPosRef.current = entryPos
+                setPlayerPos({ ...entryPos })
+                pathRef.current = [entryPos]; stepIdxRef.current = 0
+                setTimeout(() => onRequestNextMapRef.current(), 400)
+                return
+            }
+
+            if (allMessages.length > 0)
+                setLog(prev => [...prev, ...allMessages.map(text => ({ id: logIdRef.current++, text }))])
+            setStats(prev => {
+                const next = { ...prev, hp: newHp, xp: newXp, level: newLevel, attack: newAttack, armor: newArmor }
+                statsRef.current = next
+                return next
+            })
+            playerPosRef.current = entryPos
+            setPlayerPos({ ...entryPos })
+            // Anchor the auto-planner to the new position when unpaused
+            pathRef.current = [entryPos]
+            stepIdxRef.current = 0
+        }
+
+        window.addEventListener('keydown', handleKeyDown)
+        return () => window.removeEventListener('keydown', handleKeyDown)
+    }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
     return { playerPos, knownRef, visibleRef, enemiesRef, potionsRef, log, stats, narrationRef }
 }

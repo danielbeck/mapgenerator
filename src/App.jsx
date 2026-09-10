@@ -124,9 +124,8 @@ function App() {
         <div id="side-panels">
 
           <div id="stats-panel">
-            <div className="panel-title">Statistics</div>
+            <div className="panel-title">{stats.name}</div>
             <div id="stats-content">
-              <div id="stats-name">{stats.name}</div>
               <div className="stat-row">
                 <span className="stat-label">HP</span>
                 <div className="hp-bar-track">

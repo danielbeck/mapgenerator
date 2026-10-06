@@ -28,6 +28,8 @@ Each run drops an AI-controlled adventurer into a generated dungeon-like map. Th
 	The game loop detects short ABAB movement oscillations and injects a one-step escape maneuver toward novel nearby space, reducing rare two-point lockups.
 - Low-allocation visibility updates:
 	Line-of-sight uses a reusable typed-array buffer (`Uint8Array`) each tick, minimizing per-frame allocations and reducing GC pressure during high-speed simulation.
+- Bounded long-run state:
+	The journal retains only the latest 200 entries, and enemy/potion populations cap at 40/24 per map so late-game progression does not grow per-tick work without bound.
 - Layered behavior policy:
 	Combat/exploration intent is separated from path planning. At high HP, the character prefers fighting before exiting; at lower HP, it prefers potion routes before risky engagements.
 
@@ -78,4 +80,3 @@ npm run build    # Create production build
 npm run preview  # Preview production build locally
 npm run lint     # Run ESLint
 ```
-

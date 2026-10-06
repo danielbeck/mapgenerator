@@ -63,8 +63,9 @@ function pickKind(rng, mapsCleared) {
     return pool[pool.length - 1][0]
 }
 
-// Starting enemy count on map 0; grows ~1.2 per map cleared + complexity bonus
+// Starting enemy count on map 0; grows with depth up to a per-map cap.
 const BASE_ENEMY_COUNT = 4
+const MAX_ENEMIES_PER_MAP = 40
 
 /**
  * Place enemies randomly on OPEN tiles, decoupled from map generation.
@@ -85,6 +86,7 @@ export function placeEnemies(map, rng, complexity, mapsCleared = 0) {
     if (candidates.length === 0) return []
 
     const count = Math.min(
+        MAX_ENEMIES_PER_MAP,
         BASE_ENEMY_COUNT + Math.round(mapsCleared * 1.2) + Math.round(complexity * 5),
         Math.floor(candidates.length / 20),
     )

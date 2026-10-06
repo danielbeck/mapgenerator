@@ -3,8 +3,9 @@ import { TILE } from './tiles.js'
 export const POTION_COLOR = '#1e90ff'  // blue
 export const POTION_HEAL = 15         // HP restored on pickup
 
-// Map 0 starts with 4 potions; grows ~0.8 per map + small complexity bonus
+// Map 0 starts with 4 potions; grows with depth up to a per-map cap.
 const BASE_POTION_COUNT = 4
+const MAX_POTIONS_PER_MAP = 24
 
 /**
  * Place health potions randomly on OPEN tiles, decoupled from map generation.
@@ -24,6 +25,7 @@ export function placePotions(map, rng, complexity, mapsCleared = 0) {
     if (candidates.length === 0) return []
 
     const count = Math.min(
+        MAX_POTIONS_PER_MAP,
         BASE_POTION_COUNT + Math.round(mapsCleared * 0.8) + Math.round(complexity * 3),
         Math.floor(candidates.length / 15),
     )

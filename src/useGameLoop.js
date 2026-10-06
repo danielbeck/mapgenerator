@@ -14,6 +14,7 @@ export { xpToLevel }
 const META_BY_ID = Object.fromEntries(GENERATOR_META.map(g => [g.id, g]))
 
 const INITIAL_STATS = { name: 'Adventurer', hp: 100, maxHp: 100, level: 1, xp: 0, attack: 5, armor: 0, mapsCleared: 0 }
+const MAX_LOG_ENTRIES = 200
 const LOOP_HISTORY_LEN = 10
 const LOOP_PATTERN_LEN = 6
 const LOOP_BREAK_COOLDOWN_STEPS = 12
@@ -47,6 +48,7 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
     const stepMsRef = useRef(stepMs)
     const logIdRef = useRef(1)
     const narrationRef = useRef(null)
+    const timeoutRefs = useRef(new Set())
     const enemiesRef = useRef([])
     const potionsRef = useRef([])
     const complexityRef = useRef(complexity)
@@ -67,6 +69,7 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
 
     useEffect(() => {
         const curMap = map
+        const pendingTimeouts = timeoutRefs.current
 
         const known = new Uint8Array(curMap.width * curMap.height)
         knownRef.current = known
@@ -94,10 +97,7 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
         }
 
         const mapMeta = META_BY_ID[curMap.type]
-        setLog(prev => [
-            ...prev,
-            { id: logIdRef.current++, text: `You enter ${mapMeta ? mapMeta.label : 'the unknown'}.` },
-        ])
+        appendLog(setLog, logIdRef, [{ text: `You enter ${mapMeta ? mapMeta.label : 'the unknown'}.` }])
 
         momentumRef.current = null
         pathRef.current = planPath(curMap, curMap.entrance, known, exitKnownRef.current, null)
@@ -144,7 +144,7 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
                 }
                 if (exitJustRevealed) {
                     exitKnownRef.current = true
-                    setLog(prev => [...prev, { id: logIdRef.current++, text: 'You spot the exit!' }])
+                    appendLog(setLog, logIdRef, [{ text: 'You spot the exit!' }])
                 }
 
                 const atEnd = newIdx >= curPath.length - 1
@@ -153,10 +153,7 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
                 // ── Exit reached ──────────────────────────────────────────────
                 if (atEnd && atExit && !doneRef.current) {
                     doneRef.current = true
-                    setLog(prev => [
-                        ...prev,
-                        { id: logIdRef.current++, text: 'You slip through the exit and press onward into the dark.' },
-                    ])
+                    appendLog(setLog, logIdRef, [{ text: 'You slip through the exit and press onward into the dark.' }])
                     setStats(prev => {
                         const next = { ...prev, mapsCleared: prev.mapsCleared + 1 }
                         statsRef.current = next
@@ -164,7 +161,7 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
                     })
                     playerPosRef.current = { ...pos }
                     setPlayerPos({ ...pos })
-                    setTimeout(() => onRequestNextMapRef.current(), 400)
+                    scheduleTrackedTimeout(timeoutRefs, () => onRequestNextMapRef.current(), 400)
                     return
                 }
 
@@ -218,7 +215,7 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
                 newHp = potionResult.newHp
 
                 const allMessages = [...moveMessages, ...combatResult.messages, ...potionResult.messages]
-                const combatEntries = allMessages.map(text => ({ id: logIdRef.current++, text }))
+                const combatEntries = allMessages.map(text => ({ text }))
 
                 // ── Passive state (HP regen) ──────────────────────────────────
                 const visibleEnemies = enemiesRef.current.filter(e => vis[e.y * m.width + e.x])
@@ -226,16 +223,16 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
                 const passive = updatePassiveState({ hp: newHp, maxHp: st.maxHp, visibleEnemies })
                 newHp = passive.newHp
 
-                if (combatEntries.length > 0) setLog(prev => [...prev, ...combatEntries])
+                if (combatEntries.length > 0) appendLog(setLog, logIdRef, combatEntries)
 
                 // ── Death check ───────────────────────────────────────────────
                 if (newHp <= 0) {
                     doneRef.current = true
                     setStats(prev => { const next = { ...prev, hp: 0, xp: newXp, level: newLevel }; statsRef.current = next; return next })
-                    setLog(prev => [...prev, { id: logIdRef.current++, text: 'You have been slain. Your journey ends here.' }])
+                    appendLog(setLog, logIdRef, [{ text: 'You have been slain. Your journey ends here.' }])
                     playerPosRef.current = { ...pos }
                     setPlayerPos({ ...pos })
-                    setTimeout(() => {
+                    scheduleTrackedTimeout(timeoutRefs, () => {
                         setStats(INITIAL_STATS)
                         statsRef.current = INITIAL_STATS
                         setLog([{ id: 0, text: 'Your journey begins...' }])
@@ -290,7 +287,7 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
                         stepIdxRef.current = 0
                         momentumRef.current = null
                         loopBreakCooldownRef.current = LOOP_BREAK_COOLDOWN_STEPS
-                        setLog(prev => [...prev, { id: logIdRef.current++, text: 'You shake off a repetitive route and veer to new ground.' }])
+                        appendLog(setLog, logIdRef, [{ text: 'You shake off a repetitive route and veer to new ground.' }])
                     }
                 }
 
@@ -302,7 +299,11 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
         }
 
         rafRef.current = requestAnimationFrame(tick)
-        return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }
+        return () => {
+            if (rafRef.current) cancelAnimationFrame(rafRef.current)
+            for (const timeoutId of pendingTimeouts) clearTimeout(timeoutId)
+            pendingTimeouts.clear()
+        }
     }, [map]) // eslint-disable-line react-hooks/exhaustive-deps
 
     useEffect(() => {
@@ -369,11 +370,11 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
                 if (result.playerDied) {
                     doneRef.current = true
                     allMessages.push('You have been slain. Your journey ends here.')
-                    setLog(prev => [...prev, ...allMessages.map(text => ({ id: logIdRef.current++, text }))])
+                    appendLog(setLog, logIdRef, allMessages.map(text => ({ text })))
                     setStats(prev => { const next = { ...prev, hp: 0, xp: newXp, level: newLevel }; statsRef.current = next; return next })
                     playerPosRef.current = pos
                     setPlayerPos({ ...pos })
-                    setTimeout(() => {
+                    scheduleTrackedTimeout(timeoutRefs, () => {
                         setStats(INITIAL_STATS); statsRef.current = INITIAL_STATS
                         setLog([{ id: 0, text: 'Your journey begins...' }]); logIdRef.current = 1
                         onDeathRef.current()
@@ -415,17 +416,17 @@ export function useGameLoop(map, stepsPerSec, { onRequestNextMap, onDeath, compl
             if (!doneRef.current && entryPos.x === m.exit.x && entryPos.y === m.exit.y) {
                 doneRef.current = true
                 allMessages.push('You slip through the exit and press onward into the dark.')
-                setLog(prev => [...prev, ...allMessages.map(text => ({ id: logIdRef.current++, text }))])
+                appendLog(setLog, logIdRef, allMessages.map(text => ({ text })))
                 setStats(prev => { const next = { ...prev, mapsCleared: prev.mapsCleared + 1 }; statsRef.current = next; return next })
                 playerPosRef.current = entryPos
                 setPlayerPos({ ...entryPos })
                 pathRef.current = [entryPos]; stepIdxRef.current = 0
-                setTimeout(() => onRequestNextMapRef.current(), 400)
+                scheduleTrackedTimeout(timeoutRefs, () => onRequestNextMapRef.current(), 400)
                 return
             }
 
             if (allMessages.length > 0)
-                setLog(prev => [...prev, ...allMessages.map(text => ({ id: logIdRef.current++, text }))])
+                appendLog(setLog, logIdRef, allMessages.map(text => ({ text })))
             setStats(prev => {
                 const next = { ...prev, hp: newHp, xp: newXp, level: newLevel, attack: newAttack, armor: newArmor }
                 statsRef.current = next
@@ -461,6 +462,19 @@ function recordPositionAndDetectLoop(history, pos) {
     }
 
     return { a, b }
+}
+
+function appendLog(setLog, logIdRef, entries) {
+    const identifiedEntries = entries.map(({ text }) => ({ id: logIdRef.current++, text }))
+    setLog(prev => [...prev, ...identifiedEntries].slice(-MAX_LOG_ENTRIES))
+}
+
+function scheduleTrackedTimeout(timeoutRefs, callback, delay) {
+    const timeoutId = setTimeout(() => {
+        timeoutRefs.current.delete(timeoutId)
+        callback()
+    }, delay)
+    timeoutRefs.current.add(timeoutId)
 }
 
 function pickLoopEscapeStep({ map, pos, known, avoid }) {

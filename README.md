@@ -72,6 +72,16 @@ When speed is set to 0, move with:
 
 Manual mode is useful for inspecting map layouts and testing combat or visibility behavior step by step.
 
+### 4. Deploy
+
+The app is a static Vite site. To deploy the production build over SSH:
+
+1. Copy `.env.example` to `.env` and set `DEPLOY_HOST`, `DEPLOY_USER`, and `DEPLOY_BASE_DIR`. Set `DEPLOY_SUB_DIR` if deploying beneath a subdirectory. `PRODUCTION_DOMAIN` is optional.
+2. Ensure SSH key authentication and `rsync` are available locally and on the remote host.
+3. Run `./deploy.sh`.
+
+The script installs dependencies with `npm ci` if needed, builds the app locally, creates the configured remote directory, and syncs `dist/` into it. It does not delete other remote files.
+
 ## Available scripts
 
 ```bash
